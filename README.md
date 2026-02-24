@@ -1,3 +1,5 @@
+<img width="1040" height="250" alt="image" src="https://github.com/user-attachments/assets/affedd0c-26ae-48e2-93af-68003f4bcc0f" />
+
 # CloudFail v2.0
 
 > **Cloudflare Origin IP Discovery Tool** — modernized for 2026  
