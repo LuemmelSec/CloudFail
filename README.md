@@ -2,238 +2,378 @@
 
 # CloudFail v2.0
 
-> **Cloudflare Origin IP Discovery Tool** — modernized for 2026  
-> Originally created by [m0rtem](https://github.com/m0rtem/CloudFail) (2018)  
-> Rewritten & extended by the security research community
+> **Cloudflare origin IP discovery tool — 2026 Enhanced Edition**
+
+CloudFail discovers the real origin IP address(es) behind a Cloudflare-protected domain by querying certificate transparency logs, passive DNS databases, and optional paid APIs. It never sends traffic directly to the target during passive mode.
 
 ---
 
-## ⚠️ Legal Disclaimer
+## Architecture
 
-> **This tool is for authorized penetration testing and security research purposes only.**  
-> Unauthorized use against systems you do not own or have explicit written permission to test is illegal.  
-> The authors accept no liability for misuse.
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                          CloudFail v2.0                             │
+├─────────────────────────────────────────────────────────────────────┤
+│  CLI (__main__.py)                                                  │
+│    │                                                                │
+│    ├─ Phase 1: Target Init        cloudflare.py                     │
+│    │     Resolve domain → check CF membership                      │
+│    │     Load/update CF CIDR ranges (JSON API + plain-text fallback)│
+│    │                                                                │
+│    ├─ Phase 2: Passive Recon      certificate_pivot.py              │
+│    │     ┌──────────────────────────────────────────────────┐      │
+│    │     │  Free (no API key)         Paid (API key)        │      │
+│    │     │  ─────────────────         ───────────────────── │      │
+│    │     │  CertSpotter               Censys v2 REST API    │      │
+│    │     │  crt.sh (retry+backoff)    Shodan                │      │
+│    │     │  AnubisDB                  SecurityTrails        │      │
+│    │     │  RapidDNS                                        │      │
+│    │     │  ThreatMiner                                     │      │
+│    │     │  URLScan.io                                      │      │
+│    │     │  Wayback Machine CDX                             │      │
+│    │     └──────────────────────────────────────────────────┘      │
+│    │     + Passive DNS: HackerTarget, AlienVault OTX,              │
+│    │                    ViewDNS.info, RapidDNS passive              │
+│    │                                                                │
+│    ├─ Phase 3: Subdomain Resolution   dns_history.py               │
+│    │     CT names + wordlist → dnspython bulk resolve (threads)    │
+│    │     Wildcard detection                                         │
+│    │                                                                │
+│    └─ Phase 4: IP Enrichment          asn_filter.py                │
+│          ASN lookup → CF/non-CF classification → confidence score  │
+│                                                                     │
+│  utils/http_client.py  (ALL HTTP goes through here)                │
+│    requests.Session + Retry(total=5, backoff_factor=1)             │
+│    Optional Tor SOCKS5 proxy                                        │
+└─────────────────────────────────────────────────────────────────────┘
+```
 
 ---
 
-## What is CloudFail?
+## Data Sources
 
-CloudFail v2.0 discovers the **origin IP address** of websites hidden behind Cloudflare by aggregating:
-
-- **Certificate Transparency logs** (crt.sh) — passive, no API key required
-- **Censys v2** — deep TLS certificate pivoting (API key required)
-- **Shodan** — banner/certificate scanning (API key required)
-- **SecurityTrails** — historical subdomain enumeration (API key required)
-- **Passive DNS** — HackerTarget free historical lookup
-- **Subdomain bruteforce** — resolves 11,000+ subdomains to find non-CF IPs
-
-Unlike the original CloudFail, v2.0:
-- Fixes all broken integrations (DNSDumpster, Crimeflare)
-- Uses live Cloudflare IP ranges (not a static file)
-- Performs ASN validation as a fallback
-- Produces structured JSON output
-- Uses async thread pools for fast resolution
-- Works cleanly on Python 3.10–3.12
+| Source | Type | API Key | Rate Limit | Notes |
+|---|---|---|---|---|
+| CertSpotter | CT logs | No | 100 req/hour | Most reliable free CT source |
+| crt.sh | CT logs | No | None (rate limited) | Retry+backoff on 502/429 |
+| AnubisDB | CT/passive | No | None | Stable JSON endpoint |
+| RapidDNS | DNS records | No | None | HTML table extraction |
+| ThreatMiner | Passive DNS | No | None | Free JSON API |
+| URLScan.io | Page scans | No | 60/min | Free tier |
+| Wayback CDX | Historical URLs | No | None | Up to 5000 rows |
+| HackerTarget | Passive DNS | No | 100/day | Also used for ASN lookup |
+| AlienVault OTX | Passive DNS | No | 429-aware | Backoff+retry on rate limit |
+| ViewDNS.info | IP history | No | None | HTML regex extraction |
+| Censys v2 | TLS cert search | **Yes** | Varies | REST API direct |
+| Shodan | TLS cert search | **Yes** | Varies | REST API |
+| SecurityTrails | Subdomain enum | **Yes** | Varies | REST API |
 
 ---
 
 ## Installation
 
 ```bash
-# Clone or unzip the project
-cd cloudfail
+# Python 3.10–3.12 required
+python -m venv venv
+source venv/bin/activate          # Windows: venv\Scripts\activate
 
-# Install dependencies (Python 3.10–3.12 recommended)
 pip install -r requirements.txt
+```
 
-# Optional: install Shodan and Censys SDK
-pip install censys shodan
+### Optional: Tor support
+
+```bash
+# macOS
+brew install tor && brew services start tor
+
+# Debian/Ubuntu
+sudo apt install tor && sudo service tor start
+
+# Verify Tor is listening on port 9050
+nc -zv 127.0.0.1 9050
 ```
 
 ---
 
 ## Usage
 
-### Minimal (passive + subdomain bruteforce)
+### Basic scan (no API keys required)
+
 ```bash
 python -m cloudfail -t example.com --confirm-scope
 ```
 
+### Full scan with all API keys
+
+```bash
+python -m cloudfail -t example.com \
+  --censys-api-id YOUR_ID \
+  --censys-api-secret YOUR_SECRET \
+  --shodan-api YOUR_KEY \
+  --securitytrails-api YOUR_KEY \
+  --confirm-scope
+```
+
 ### Passive only (no DNS bruteforce)
+
 ```bash
 python -m cloudfail -t example.com --passive-only --confirm-scope
 ```
 
-### With Censys (recommended)
+### Output to JSON file
+
 ```bash
-python -m cloudfail \
-  -t example.com \
-  --censys-api-id YOUR_ID \
-  --censys-api-secret YOUR_SECRET \
-  --confirm-scope
+python -m cloudfail -t example.com \
+  --output json --output-file results.json --confirm-scope
 ```
 
-### Full scan with all APIs
-```bash
-python -m cloudfail \
-  -t example.com \
-  --censys-api-id YOUR_ID \
-  --censys-api-secret YOUR_SECRET \
-  --shodan-api YOUR_SHODAN_KEY \
-  --securitytrails-api YOUR_ST_KEY \
-  --threads 20 \
-  --confirm-scope
-```
+### Route through Tor
 
-### JSON output
 ```bash
-python -m cloudfail \
-  -t example.com \
-  --output json \
-  --output-file results.json \
-  --confirm-scope
-```
-
-### Via Tor
-```bash
-# Requires Tor running locally on port 9050
 python -m cloudfail -t example.com --tor --confirm-scope
 ```
 
+### Behind a corporate TLS-inspection proxy
+
+```bash
+python -m cloudfail -t example.com --no-verify-ssl --confirm-scope
+```
+
+### Debug mode (full tracebacks and HTTP details)
+
+```bash
+python -m cloudfail -t example.com --debug --confirm-scope
+```
+
+### Quiet mode (results only, no progress messages)
+
+```bash
+python -m cloudfail -t example.com --quiet --output json --confirm-scope
+```
+
 ---
 
-## Arguments
+## All CLI Flags
 
 | Flag | Description |
-|------|-------------|
+|---|---|
 | `-t, --target` | Target domain (required) |
-| `--confirm-scope` | **Required** — confirms authorization to test |
+| `--confirm-scope` | Required — confirm authorisation (required) |
+| `--passive-only` | Skip subdomain bruteforce |
+| `--tor` | Route via Tor SOCKS5 (127.0.0.1:9050) |
+| `--no-tor` | Explicitly disable Tor |
+| `--no-verify-ssl` | Disable SSL verification |
+| `--subdomains FILE` | Custom wordlist path |
+| `--threads N` | DNS resolver threads (default: 10) |
+| `--update-ranges` | Re-download Cloudflare IP ranges |
 | `--censys-api-id` | Censys v2 API ID |
-| `--censys-api-secret` | Censys v2 API Secret |
+| `--censys-api-secret` | Censys v2 API secret |
 | `--shodan-api` | Shodan API key |
 | `--securitytrails-api` | SecurityTrails API key |
-| `--passive-only` | Skip subdomain bruteforce |
-| `--tor` | Route through local Tor (SOCKS5 127.0.0.1:9050) |
-| `--no-tor` | Explicitly disable Tor |
-| `--threads N` | Thread count for DNS resolution (default: 10) |
-| `--subdomains FILE` | Custom subdomain wordlist |
-| `--update-ranges` | Re-download Cloudflare IP ranges |
-| `--output text/json` | Output format |
+| `--output text\|json` | Output format (default: text) |
 | `--output-file PATH` | Save results to file |
+| `--debug` | Enable debug output |
+| `--quiet` | Suppress progress messages |
 
 ---
 
-## Scan Phases
+## Example JSON Output
 
+```json
+{
+  "target": "example.com",
+  "resolved_ip": "104.21.5.12",
+  "behind_cloudflare": true,
+  "ct_names": [
+    "mail.example.com",
+    "api.example.com",
+    "staging.example.com"
+  ],
+  "passive_dns_ips": ["203.0.113.42", "198.51.100.7"],
+  "non_cloudflare_ips": [
+    {
+      "ip": "203.0.113.42",
+      "asn": "AS12345",
+      "is_cloudflare": "no",
+      "confidence": "90"
+    }
+  ],
+  "subdomain_hits": [
+    { "host": "staging.example.com", "ip": "203.0.113.42", "behind_cloudflare": false },
+    { "host": "www.example.com",     "ip": "104.21.5.12",  "behind_cloudflare": true  }
+  ]
+}
 ```
-Phase 1: Target Initialisation
-  └── Resolve domain → check if IP is in Cloudflare ranges
-
-Phase 2: Passive Certificate & DNS Recon
-  ├── crt.sh  (certificate transparency)
-  ├── Censys v2  (TLS certificate pivoting)
-  ├── Shodan  (optional)
-  ├── SecurityTrails  (optional)
-  └── HackerTarget PassiveDNS
-
-Phase 3: Subdomain Resolution
-  ├── Merge crt.sh names + SecurityTrails + wordlist
-  ├── Wildcard DNS detection
-  └── Thread-pool DNS resolution (max 10 workers)
-
-Phase 4: Candidate IP Enrichment
-  ├── ASN lookup per IP (HackerTarget)
-  ├── Cloudflare range membership check
-  └── Confidence scoring
-```
-<img width="2616" height="2032" alt="image" src="https://github.com/user-attachments/assets/513c1ee3-6ddd-4fbe-a749-8aa868c8db33" />
 
 ---
 
-## Output Example
+## Error Resilience
 
-```
-╭─────────────────────────────────────────────────────╮
-│           CloudFail v2.0 — Scan Summary             │
-│ Target:            example.com                      │
-│ Resolved IP:       104.21.x.x                       │
-│ Behind Cloudflare: Yes                              │
-│ CT Names (crt.sh): 47                               │
-│ Subdomain Hits:    312                              │
-│ Candidate IPs:     18                               │
-│ Non-CF IPs Found:  3                                │
-╰─────────────────────────────────────────────────────╯
+CloudFail is designed to **never crash** because a single data source fails:
 
-Non-Cloudflare IPs (Potential Origin Servers)
-┌──────────────────┬──────────┬───────────┬────────────┐
-│ IP Address       │ ASN      │ CF Status │ Confidence │
-├──────────────────┼──────────┼───────────┼────────────┤
-│ 45.33.x.x        │ AS63949  │ ✘ Not CF  │ 90%        │
-│ 198.51.x.x       │ AS16509  │ ✘ Not CF  │ 90%        │
-└──────────────────┴──────────┴───────────┴────────────┘
+| Failure | Behaviour |
+|---|---|
+| crt.sh returns 502 | Retry up to 5 times with exponential backoff; log warning and continue |
+| crt.sh returns 429 | Backoff and retry; continue with other sources |
+| AlienVault OTX 429 | Backoff 4s / 8s / skip; never crash phase |
+| Censys 302 redirect | `allow_redirects=True` follows automatically |
+| Censys 401/403 | Log descriptive message; skip gracefully |
+| Any API unavailable | Warning logged; scan continues |
+| DNS resolution timeout | dnspython per-resolver timeout; returns None |
+| Wildcard DNS | Detected and warned; CT names still valid |
+| Network unreachable | Exception caught; warning logged |
+| Tor not running | Log error; continue without Tor |
+
+---
+
+## Rate Limit Notes
+
+| Source | Limit | Behaviour on Limit |
+|---|---|---|
+| CertSpotter | 100 req/hour | Warning logged |
+| HackerTarget | 100 req/day | Warning with API key upgrade note |
+| AlienVault OTX | Variable | 429 → backoff 4s, 8s, then skip |
+| URLScan.io | 60/min free | 429 → warning + skip |
+| ThreatMiner | Shared rate | 429 → warning + skip |
+| Censys v2 | Quota-based | 429 → stop pagination |
+| Shodan | Credit-based | 401 → invalid key warning |
+
+---
+
+## Tor Usage
+
+When `--tor` is specified:
+
+1. The shared `requests.Session` is reconfigured to use `socks5h://127.0.0.1:9050`
+2. Connectivity is verified via `https://check.torproject.org/api/ip`
+3. All subsequent HTTP calls (including DNS-over-HTTPS style) route through Tor
+4. Requires: `pip install PySocks` and a running Tor service
+
+> **Note:** DNS resolution via `dnspython` uses system resolvers, not the HTTP proxy. For fully anonymous DNS, run a local DNS-over-Tor setup or use `--passive-only` with Tor.
+
+---
+
+## Confidence Scoring
+
+| Score | Meaning |
+|---|---|
+| 95% | IP is in a Cloudflare CIDR block (definitive CF match) |
+| 90% | IP is NOT in any CF range and ASN is not AS13335 |
+| 70% | IP not in CF range but ASN matches AS13335 (possible new range) |
+| 0% | ASN lookup failed — treat as unknown |
+
+---
+
+## Troubleshooting
+
+### `Could not load Cloudflare IP ranges`
+
+```bash
+# Force fresh download and disable SSL verification
+python -m cloudfail -t example.com --update-ranges --no-verify-ssl --confirm-scope
 ```
+
+### `crt.sh returning many 502 errors`
+
+crt.sh can be slow under load. CloudFail retries automatically (5 attempts, exponential backoff). Other sources (CertSpotter, AnubisDB, RapidDNS etc.) will still return data.
+
+### `AlienVault OTX always 429`
+
+OTX rate limits anonymous access. CloudFail backs off and skips OTX after 3 failures. Other passive DNS sources continue. Consider registering for a free OTX API key.
+
+### `Censys HTTP 302`
+
+Fixed in v2.0 Enhanced — `allow_redirects=True` is set on the Censys call. Ensure you're using **v2 credentials** from `https://search.censys.io/account/api` (not the legacy app.censys.io keys).
+
+### `No results at all`
+
+- Try `--debug` to see full HTTP responses
+- Try `--no-verify-ssl` if behind a corporate proxy
+- Check your internet connection can reach external APIs
+
+### HackerTarget daily limit
+
+HackerTarget limits anonymous requests to 100/day. The ASN enrichment phase uses one HackerTarget call per non-CF IP. For large scans register for a free API key at `hackertarget.com`.
+
+---
+
+## Performance Notes
+
+- Phase 2 passive sources run **concurrently** (5 threads by default)
+- Phase 3 subdomain resolution runs with `--threads` workers (default: 10)
+- Typical full scan of a large domain: 3–8 minutes
+- Use `--passive-only` to skip the ~11k subdomain wordlist and reduce to 1–2 minutes
+- Use `--threads 25` to speed up subdomain resolution (watch for DNS resolver bans)
+
+---
+
+## API Quota Warnings
+
+- **Censys v2 free tier**: limited monthly query quota — check `search.censys.io/account`
+- **Shodan free tier**: host search is a paid feature; you need a paid plan or use the membership API
+- **SecurityTrails free tier**: 50 API calls/month on free plan
+- **HackerTarget**: 100 free queries/day across all their endpoints combined
 
 ---
 
 ## Project Structure
 
 ```
-cloudfail/
-├── __main__.py          # CLI entrypoint + orchestration
-├── __init__.py
-├── config.py            # Constants and paths
-├── core/
-│   ├── cloudflare.py    # CF IP ranges + detection
-│   ├── certificate_pivot.py  # crt.sh, Censys, Shodan, SecurityTrails
-│   ├── dns_history.py   # DNS resolution + passive DNS
-│   ├── asn_filter.py    # ASN lookup + enrichment
-│   └── tor_handler.py   # Optional Tor routing
-├── utils/
-│   ├── logger.py        # Rich-based logging
-│   └── http_client.py   # Session management + retry
-└── data/
-    └── subdomains.txt   # 11,000+ subdomain wordlist
-requirements.txt
-README.md
+CloudFail-main/
+├── requirements.txt
+├── README.md
+└── cloudfail/
+    ├── __init__.py
+    ├── __main__.py          # CLI entry point, phase orchestration
+    ├── config.py            # Constants, runtime state
+    ├── data/
+    │   ├── subdomains.txt   # Built-in ~11k subdomain wordlist
+    │   └── cf-subnet.txt    # Cached Cloudflare CIDR ranges (auto-generated)
+    ├── core/
+    │   ├── cloudflare.py    # CF range management, IP detection
+    │   ├── certificate_pivot.py  # CT + passive sources + Censys/Shodan/ST
+    │   ├── dns_history.py   # DNS resolution + passive DNS aggregation
+    │   ├── asn_filter.py    # ASN lookup, IP enrichment
+    │   └── tor_handler.py   # Tor SOCKS5 proxy configuration
+    └── utils/
+        ├── http_client.py   # Centralised HTTP session (ALL requests here)
+        └── logger.py        # Rich-based logger with debug/quiet modes
 ```
 
 ---
 
-## API Keys
+## Legal Disclaimer
 
-| Service | Free Tier | URL |
-|---------|-----------|-----|
-| Censys v2 | 250 queries/month | https://search.censys.io/account |
-| Shodan | $49/month | https://account.shodan.io |
-| SecurityTrails | 50 queries/month | https://securitytrails.com/app/account |
-| HackerTarget | Free (limited) | Built-in, no key needed |
-| crt.sh | Free, unlimited | Built-in, no key needed |
+This tool is provided for **authorized security testing and research purposes only**.
+
+- You must have explicit written permission from the asset owner before scanning
+- Unauthorized scanning may violate the Computer Fraud and Abuse Act (CFAA), the Computer Misuse Act, and equivalent laws in your jurisdiction
+- The authors accept no liability for misuse of this tool
+- Cloudflare's ToS prohibits intentional origin IP discovery against protected customers
+- Use responsibly and ethically
 
 ---
 
-## Changelog from v1.0.5
+## Contribution Guide
 
-- Removed broken DNSDumpster scraping
-- Removed outdated Crimeflare database
-- Removed `win_inet_pton` Windows-only dependency
-- Removed `colorama` (replaced with `rich`)
-- Removed `socks` / `sockshandler` (replaced with `requests[socks]`)
-- Added Censys v2 API integration
-- Added crt.sh certificate transparency pivot
-- Added Shodan integration
-- Added SecurityTrails integration
-- Added ASN-based Cloudflare validation
-- Added thread-safe DNS resolution
-- Added JSON output mode
-- Added rate limiting
-- Added `--confirm-scope` ethical guardrail
-- Full Python 3.10–3.12 compatibility
-- Zero deprecated library usage
-- Zero invalid escape sequence warnings
-- Modular, typed, documented codebase
+1. Fork the repository
+2. Create a feature branch: `git checkout -b feature/new-source`
+3. Add your data source in `certificate_pivot.py` or `dns_history.py`
+4. Ensure it:
+   - Uses `http_client.get()` — never `requests.get()` directly
+   - Has timeout handling
+   - Returns an empty list/set on any failure (never raises)
+   - Has a `logger.info/warning` for rate limits
+   - Has a `logger.debug_exc()` call in the except block
+5. Add it to the concurrent source map in the aggregation function
+6. Update the data sources table in README.md
+7. Submit a PR
 
 ---
 
 ## License
 
-MIT License — see original CloudFail for attribution.
+MIT License — see original CloudFail repository for full text.
+
+Original CloudFail by [m0rtem](https://github.com/m0rtem/CloudFail) (2018).  
+v2.0 Enhanced Edition (2026).
