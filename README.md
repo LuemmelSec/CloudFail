@@ -151,6 +151,11 @@ python -m cloudfail -t example.com --debug --confirm-scope
 python -m cloudfail -t example.com --quiet --output json --confirm-scope
 ```
 
+### Demo
+
+<img width="3452" height="846" alt="image" src="https://github.com/user-attachments/assets/d0601083-bdd9-4901-b1a5-59cdcbd97e83" />
+<img width="3442" height="1292" alt="image" src="https://github.com/user-attachments/assets/9f2adccf-9a95-4547-a709-9fd224e18117" />
+
 ---
 
 ## All CLI Flags
