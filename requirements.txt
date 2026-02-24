@@ -1,6 +1,0 @@
-requests>=2.31.0
-rich>=13.7.0
-dnspython>=2.6.0
-censys>=2.2.0
-shodan>=1.31.0
-cryptography>=42.0.0
