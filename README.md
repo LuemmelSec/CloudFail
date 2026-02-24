@@ -146,6 +146,7 @@ Phase 4: Candidate IP Enrichment
   ├── Cloudflare range membership check
   └── Confidence scoring
 ```
+<img width="2616" height="2032" alt="image" src="https://github.com/user-attachments/assets/513c1ee3-6ddd-4fbe-a749-8aa868c8db33" />
 
 ---
 
