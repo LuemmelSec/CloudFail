@@ -97,13 +97,6 @@ nc -zv 127.0.0.1 9050
 
 ## Usage
 
-> **⚠️ Important:** CloudFail works great with **10 free data sources** (no API keys needed). API keys are optional:
-> - **Censys**: Requires paid Starter plan ($99+/mo) - free tier cannot use search API
-> - **Shodan**: Optional, has free tier with API access
-> - **SecurityTrails**: Optional
->
-> Most users should run without any API keys!
-
 ### Basic scan (no API keys required)
 
 ```bash
